@@ -1,0 +1,20 @@
+# PDF parsing
+pymupdf>=1.23.0
+
+# OCR engines
+pytesseract>=0.3.10
+easyocr>=1.7.1
+paddlepaddle>=2.6.0
+paddleocr>=2.7.0
+
+# Image handling
+Pillow>=10.0.0
+
+# EPUB assembly
+ebooklib>=0.18
+
+# HTML/XML generation
+lxml>=4.9.0
+
+# Utilities (difflib is stdlib — no extra package needed)
+tqdm>=4.66.0
