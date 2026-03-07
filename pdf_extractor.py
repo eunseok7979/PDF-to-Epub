@@ -71,7 +71,7 @@ def _extract_text_blocks(page: fitz.Page) -> List[TextBlock]:
     page_height = page.rect.height
 
     # get_text("dict") gives per-span font information
-    raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
+    raw = page.get_text("dict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
 
     for block in raw.get("blocks", []):
         if block.get("type") != 0:  # type 0 = text, type 1 = image
