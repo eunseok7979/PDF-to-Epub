@@ -31,7 +31,7 @@ import image_handler
 import structure_parser
 import notes_linker
 import epub_builder
-from ocr import tesseract_ocr, easyocr_ocr, paddleocr_ocr, reconciler
+from ocr import tesseract_ocr, easyocr_ocr, reconciler
 
 
 # ---------------------------------------------------------------------------
@@ -61,17 +61,14 @@ def _run_ocr_for_page(
     Run the appropriate OCR engines for the given page and return a dict of
     raw text outputs keyed by engine name.
 
-    For born-digital pages:   Tesseract + EasyOCR  (native text = candidate A)
-    For scanned pages:        Tesseract + EasyOCR + PaddleOCR
+    Born-digital: Tesseract + EasyOCR  (three-way vote with native text)
+    Scanned:      Tesseract + EasyOCR  (two-way vote — no PaddleOCR needed)
     """
     img = page.rendered_image  # always set (pdf_extractor renders all pages)
-    results: Dict[str, str] = {
+    return {
         "tesseract": tesseract_ocr.run(img, lang=tesseract_lang),
         "easyocr": easyocr_ocr.run(img),
     }
-    if page.is_scanned:
-        results["paddleocr"] = paddleocr_ocr.run(img)
-    return results
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +114,6 @@ def convert(
             native_text=native_text,
             tesseract_text=ocr_results.get("tesseract", ""),
             easyocr_text=ocr_results.get("easyocr", ""),
-            paddleocr_text=ocr_results.get("paddleocr", ""),
         )
         reconciled_texts[page.page_number] = reconciled
 
