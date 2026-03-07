@@ -16,7 +16,7 @@ import numpy as np
 
 
 # PaddleOCR language codes relevant to our use case
-_PADDLE_LANGS = ["korean", "en", "chinese_cht"]
+_PADDLE_LANGS = ["korean", "en"]
 
 # Singleton readers keyed by language string
 _readers: dict = {}
@@ -28,7 +28,7 @@ def _get_reader(lang: str):
         try:
             from paddleocr import PaddleOCR
             # use_angle_cls=True handles rotated text; show_log=False suppresses verbose output
-            _readers[lang] = PaddleOCR(use_angle_cls=True, lang=lang, show_log=False)
+            _readers[lang] = PaddleOCR(use_angle_cls=True, lang=lang)
         except Exception as exc:
             warnings.warn(f"PaddleOCR init failed for lang='{lang}': {exc}")
             _readers[lang] = None
