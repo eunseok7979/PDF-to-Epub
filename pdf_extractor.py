@@ -70,7 +70,7 @@ def _extract_text_blocks(page: fitz.Page) -> List[TextBlock]:
     blocks = []
     page_height = page.rect.height
 
-    # get_text("rawdict") gives per-span font information
+    # get_text("dict") gives per-span font information
     raw = page.get_text("rawdict", flags=fitz.TEXT_PRESERVE_WHITESPACE)
 
     for block in raw.get("blocks", []):
