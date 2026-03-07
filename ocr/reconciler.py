@@ -195,50 +195,6 @@ def reconcile(
 
 
 # ---------------------------------------------------------------------------
-# Two-candidate reconciliation (for scanned pages)
-# ---------------------------------------------------------------------------
-
-def reconcile_two(
-    candidate_a: str,
-    candidate_b: str,
-    page_number: int = -1,
-) -> str:
-    """
-    Reconcile two text candidates at the sentence level.
-
-    Rule:
-    - If sentences agree → accept.
-    - If they differ   → accept candidate_a (Tesseract, the more trusted engine)
-                         and log the discrepancy.
-
-    Used for scanned pages where only Tesseract and EasyOCR are run.
-    """
-    sents_a = split_sentences(candidate_a)
-    sents_b = split_sentences(candidate_b)
-
-    if not sents_a and not sents_b:
-        return ""
-
-    ab_pairs = _align_two(sents_a, sents_b)
-    accepted: List[str] = []
-
-    for sa, sb in ab_pairs:
-        if _sentences_match(sa, sb):
-            accepted.append(sa)  # type: ignore[arg-type]
-        else:
-            chosen = sa or sb
-            if chosen:
-                logger.warning(
-                    "Page %d: OCR candidates differ. "
-                    "Falling back to candidate A (Tesseract).\n  A: %r\n  B: %r",
-                    page_number, sa, sb,
-                )
-                accepted.append(chosen)
-
-    return "\n".join(s for s in accepted if s)
-
-
-# ---------------------------------------------------------------------------
 # Page-level entry point
 # ---------------------------------------------------------------------------
 
@@ -248,17 +204,26 @@ def reconcile_page(
     native_text: str,
     tesseract_text: str,
     easyocr_text: str,
+    paddleocr_text: str = "",
 ) -> str:
     """
-    Select the correct candidates based on page type and run reconciliation.
+    Select the correct three candidates based on page type and run reconciliation.
 
-    Born-digital: three-way vote  (native_text, tesseract_text, easyocr_text)
-    Scanned:      two-way vote    (tesseract_text, easyocr_text)
+    Born-digital or scanned-with-embedded-text (is_scanned=False):
+        three-way vote: (native_text, tesseract_text, easyocr_text)
+
+    Pure scan — no selectable text layer (is_scanned=True):
+        three-way vote: (tesseract_text, easyocr_text, paddleocr_text)
+
+    A scanned page with an embedded OCR text layer has enough characters to
+    pass the born-digital threshold in pdf_extractor, so it is classified as
+    is_scanned=False and handled identically to a born-digital page.
     """
     if is_scanned:
-        return reconcile_two(
+        return reconcile(
             tesseract_text,
             easyocr_text,
+            paddleocr_text,
             page_number=page_number,
         )
     else:
