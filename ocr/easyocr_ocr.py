@@ -14,7 +14,7 @@ import numpy as np
 
 
 # EasyOCR language codes
-EASYOCR_LANGS: List[str] = ["ko", "en", "ch_tra"]
+EASYOCR_LANGS: List[str] = ["ko", "en"]
 
 _reader = None  # singleton
 
