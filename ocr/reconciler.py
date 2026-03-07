@@ -28,13 +28,13 @@ logger = logging.getLogger(__name__)
 
 # Sentence-ending punctuation shared by Korean, English, and CJK scripts
 _SENT_END = re.compile(
-    r'(?<=[.!?。！？])\s+|(?<=[.!?。！？])$',
+    r'(?<=[.!?\u3002\uff01\uff1f])\s+|(?<=[.!?\u3002\uff01\uff1f])$',
     re.MULTILINE,
 )
 
 # Korean sentence-ending verbal endings (simplified heuristic)
 _KO_SENT_END = re.compile(
-    r'(?<=[다요까죠네요]\.?\s)',
+    r'(?<=\ub2c8\ub2e4)\s|(?<=\uc2b5\ub2c8\ub2e4)\s|(?<=\uc694)\s|(?<=\uc2ed\ub2c8\ub2e4)\s',
 )
 
 
