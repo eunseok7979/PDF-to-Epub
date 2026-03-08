@@ -1,7 +1,8 @@
 """
 ocr/easyocr_ocr.py
 ------------------
-EasyOCR wrapper for Korean, English, and Traditional Chinese.
+EasyOCR wrapper for Korean and English.
+(Chinese Traditional is incompatible with Korean in EasyOCR.)
 Uses a module-level singleton Reader to avoid expensive repeated initialisation.
 """
 
@@ -13,7 +14,7 @@ from PIL import Image
 import numpy as np
 
 
-# EasyOCR language codes
+# EasyOCR language codes (ko + ch_tra are incompatible)
 EASYOCR_LANGS: List[str] = ["ko", "en"]
 
 _reader = None  # singleton
@@ -37,7 +38,7 @@ def run(image: Image.Image, langs: Optional[List[str]] = None) -> str:
     output respects reading order (top-to-bottom).
 
     Args:
-        image: PIL Image (RGB) of a rendered PDF page.
+        image: PIL Image (RGB) of a page or cropped text region.
         langs: EasyOCR language list. Defaults to EASYOCR_LANGS.
 
     Returns:

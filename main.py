@@ -1,18 +1,20 @@
 """
 main.py
 -------
-Command-line entry point for the PDF → EPUB converter.
+Command-line entry point for the PDF-to-EPUB converter.
+
+Two-stage pipeline:
+  Stage 1: PaddleOCR PP-StructureV2 layout analysis per page.
+           - header / footer / page_number  -> discarded
+           - figure / table                 -> cropped as images
+           - text / title / reference       -> passed to Stage 2
+
+  Stage 2: Per-region OCR reconciliation (character-level 3-way vote).
+           - Pages with selectable text: native + Tesseract + EasyOCR
+           - Pure-scan pages:            Tesseract + EasyOCR + PaddleOCR
 
 Usage:
     python main.py input.pdf output.epub [options]
-
-Options:
-    --title TEXT        Book title  (default: PDF filename stem)
-    --author TEXT       Author name (default: empty)
-    --dpi INT           Render DPI for scanned pages (default: 300)
-    --lang TEXT         Tesseract language string (default: kor+eng+chi_tra)
-    --ocr-log FILE      Write OCR discrepancy log to FILE (default: stderr)
-    --images-dir DIR    Temp directory for extracted images (default: <output>.images/)
 """
 
 from __future__ import annotations
@@ -20,13 +22,13 @@ from __future__ import annotations
 import argparse
 import logging
 import sys
-import tempfile
 from pathlib import Path
-from typing import Dict
+from typing import Dict, List
 
 from tqdm import tqdm
 
 import pdf_extractor
+import layout_analyzer
 import image_handler
 import structure_parser
 import notes_linker
@@ -50,31 +52,6 @@ def _setup_logging(log_file: str | None) -> None:
 
 
 # ---------------------------------------------------------------------------
-# OCR pipeline for a single page
-# ---------------------------------------------------------------------------
-
-def _run_ocr_for_page(
-    page: pdf_extractor.PageData,
-    tesseract_lang: str,
-) -> Dict[str, str]:
-    """
-    Run the appropriate OCR engines for the given page and return a dict of
-    raw text outputs keyed by engine name.
-
-    Born-digital or scanned-with-embedded-text: native + Tesseract + EasyOCR (3-way)
-    Pure scan (no text layer):                  Tesseract + EasyOCR + PaddleOCR (3-way)
-    """
-    img = page.rendered_image  # always set (pdf_extractor renders all pages)
-    results: Dict[str, str] = {
-        "tesseract": tesseract_ocr.run(img, lang=tesseract_lang),
-        "easyocr": easyocr_ocr.run(img),
-    }
-    if page.is_scanned:
-        results["paddleocr"] = paddleocr_ocr.run(img)
-    return results
-
-
-# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 
@@ -87,63 +64,153 @@ def convert(
     tesseract_lang: str,
     images_dir: Path,
 ) -> None:
+
+    # ==================================================================
+    # Step 1: Render all pages
+    # ==================================================================
     print(f"[1/6] Extracting PDF: {input_pdf}")
     pages = pdf_extractor.extract_pdf(input_pdf, dpi=dpi)
     total_pages = len(pages)
     scanned_count = sum(1 for p in pages if p.is_scanned)
     digital_count = total_pages - scanned_count
-    print(f"      {total_pages} pages  ({digital_count} born-digital, {scanned_count} scanned)")
+    print(f"      {total_pages} pages  "
+          f"({digital_count} born-digital/embedded-OCR, {scanned_count} pure-scan)")
 
-    print(f"[2/6] Extracting images …")
-    images = image_handler.extract_images(input_pdf)
-    print(f"      {len(images)} image occurrence(s) found")
-    image_handler.save_images(images, images_dir)
-    page_image_map = image_handler.build_page_image_map(images)
+    # Keep a fitz.Document open for clip-based text extraction
+    doc = pdf_extractor.open_pdf(input_pdf)
 
-    print(f"[3/6] Running OCR & reconciliation …")
-    reconciled_texts: Dict[int, str] = {}
+    # ==================================================================
+    # Step 2: Layout analysis + figure extraction + OCR reconciliation
+    # ==================================================================
+    print(f"[2/6] Layout analysis + OCR reconciliation ...")
+
+    all_region_blocks: List[structure_parser.RegionBlock] = []
+    all_images: List[image_handler.ExtractedImage] = []
+    image_counter = 1
+
+    # Collect all font sizes for body-font baseline
+    all_font_sizes: List[float] = []
 
     for page in tqdm(pages, desc="Pages", unit="page"):
-        # Build native text from born-digital text blocks
-        native_text = "\n".join(
-            tb.text for tb in page.text_blocks if tb.text.strip()
-        )
+        rendered = page.rendered_image
+        fitz_page = doc[page.page_number]
 
-        ocr_results = _run_ocr_for_page(page, tesseract_lang)
+        # ---- Stage 1: layout analysis ----
+        regions = layout_analyzer.analyze_layout(rendered, page.page_number)
+        text_regions, figure_regions, discarded = layout_analyzer.filter_regions(regions)
 
-        reconciled = reconciler.reconcile_page(
-            page_number=page.page_number,
-            is_scanned=page.is_scanned,
-            native_text=native_text,
-            tesseract_text=ocr_results.get("tesseract", ""),
-            easyocr_text=ocr_results.get("easyocr", ""),
-            paddleocr_text=ocr_results.get("paddleocr", ""),
-        )
-        reconciled_texts[page.page_number] = reconciled
+        # ---- Extract figures ----
+        if figure_regions:
+            fig_bboxes = [r.bbox for r in figure_regions]
+            cropped = image_handler.crop_figures(
+                rendered, fig_bboxes, page.page_number,
+                start_counter=image_counter,
+            )
+            all_images.extend(cropped)
 
-    print(f"[4/6] Parsing document structure …")
-    blocks = structure_parser.parse_structure(pages, reconciled_texts)
-    blocks = structure_parser.inject_image_placeholders(blocks, page_image_map)
+            # Insert image placeholder RegionBlocks at the correct position
+            for i, fr in enumerate(figure_regions):
+                img_id = f"img_{image_counter + i:04d}"
+                all_region_blocks.append(structure_parser.RegionBlock(
+                    region_type=fr.region_type,
+                    text=img_id,  # image_id stored in .text for image blocks
+                    page_number=page.page_number,
+                ))
+            image_counter += len(cropped)
+
+        # ---- Stage 2: per-region OCR reconciliation for text regions ----
+        for region in text_regions:
+            bbox = region.bbox
+
+            # Native text via PyMuPDF clip (pixel coords -> PDF coords)
+            native_text = pdf_extractor.get_clip_text(fitz_page, bbox, dpi)
+
+            # Crop the region image for OCR engines
+            region_image = layout_analyzer.crop_region(rendered, bbox)
+
+            # Run OCR engines
+            tess_text = tesseract_ocr.run(region_image, lang=tesseract_lang)
+            easy_text = easyocr_ocr.run(region_image)
+
+            # Determine which candidates to use
+            if page.is_scanned:
+                # Pure scan: no native text -> Tesseract + EasyOCR + PaddleOCR
+                paddle_text = paddleocr_ocr.run(region_image)
+                reconciled = reconciler.reconcile_text(
+                    tess_text, easy_text, paddle_text,
+                    page_number=page.page_number,
+                    region_label=f"region({int(bbox[0])},{int(bbox[1])})",
+                )
+            else:
+                # Born-digital / embedded OCR: native + Tesseract + EasyOCR
+                reconciled = reconciler.reconcile_text(
+                    native_text, tess_text, easy_text,
+                    page_number=page.page_number,
+                    region_label=f"region({int(bbox[0])},{int(bbox[1])})",
+                )
+
+            # Get font metadata for heading detection
+            font_size, is_bold = pdf_extractor.get_font_info_in_region(
+                fitz_page, bbox, dpi
+            )
+            all_font_sizes.append(font_size)
+
+            all_region_blocks.append(structure_parser.RegionBlock(
+                region_type=region.region_type,
+                text=reconciled,
+                page_number=page.page_number,
+                font_size=font_size,
+                is_bold=is_bold,
+            ))
+
+    doc.close()
+
+    # Save extracted figure images
+    if all_images:
+        image_handler.save_images(all_images, images_dir)
+    print(f"      {len(all_images)} figure(s)/table(s) extracted")
+
+    # ==================================================================
+    # Step 3: Build document structure
+    # ==================================================================
+    print(f"[3/6] Parsing document structure ...")
+
+    # Compute dominant body font size
+    if all_font_sizes:
+        from collections import Counter
+        rounded = [round(s, 1) for s in all_font_sizes if s > 0]
+        body_font_size = Counter(rounded).most_common(1)[0][0] if rounded else 12.0
+    else:
+        body_font_size = 12.0
+
+    blocks = structure_parser.build_blocks(all_region_blocks, body_font_size)
+
     headings = [b for b in blocks if b.block_type == "heading"]
     footnotes = [b for b in blocks if b.block_type == "footnote"]
     endnotes = [b for b in blocks if b.block_type == "endnote"]
-    print(
-        f"      {len(headings)} headings, "
-        f"{len(footnotes)} footnotes, "
-        f"{len(endnotes)} endnotes"
-    )
+    print(f"      {len(headings)} headings, "
+          f"{len(footnotes)} footnotes, "
+          f"{len(endnotes)} endnotes")
 
-    print(f"[5/6] Linking footnotes & endnotes …")
+    # ==================================================================
+    # Step 4: Link footnotes & endnotes
+    # ==================================================================
+    print(f"[4/6] Linking footnotes & endnotes ...")
     linked_blocks = notes_linker.link_notes(blocks)
 
-    print(f"[6/6] Building EPUB …")
+    # ==================================================================
+    # Step 5: Build EPUB
+    # ==================================================================
+    print(f"[5/6] Building EPUB ...")
     epub_builder.build_epub(
         linked_blocks=linked_blocks,
-        images=images,
+        images=all_images,
         output_path=output_epub,
         title=title,
         author=author,
     )
+
+    print(f"[6/6] Done.")
 
 
 # ---------------------------------------------------------------------------
@@ -153,7 +220,8 @@ def convert(
 def main() -> None:
     parser = argparse.ArgumentParser(
         prog="pdf-to-epub",
-        description="Convert a PDF file to EPUB3 with OCR reconciliation and linked notes.",
+        description="Convert a PDF to EPUB3 with layout analysis, "
+                    "OCR reconciliation, and linked notes.",
     )
     parser.add_argument("input", metavar="INPUT.pdf", help="Input PDF file")
     parser.add_argument("output", metavar="OUTPUT.epub", help="Output EPUB file")
@@ -161,11 +229,11 @@ def main() -> None:
     parser.add_argument("--author", default="", help="Author name")
     parser.add_argument(
         "--dpi", type=int, default=300,
-        help="Render resolution for scanned pages (default: 300)"
+        help="Render resolution for all pages (default: 300)"
     )
     parser.add_argument(
-        "--lang", default="kor+eng+chi_tra",
-        help="Tesseract language string (default: kor+eng+chi_tra)"
+        "--lang", default="kor+eng",
+        help="Tesseract language string (default: kor+eng)"
     )
     parser.add_argument(
         "--ocr-log", default=None, metavar="FILE",
@@ -173,7 +241,7 @@ def main() -> None:
     )
     parser.add_argument(
         "--images-dir", default=None, metavar="DIR",
-        help="Directory for extracted images (default: <output>.images/)"
+        help="Directory for extracted figure images (default: <output>.images/)"
     )
 
     args = parser.parse_args()

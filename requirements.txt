@@ -9,6 +9,7 @@ paddleocr>=2.7.0
 
 # Image handling
 Pillow>=10.0.0
+numpy>=1.24.0
 
 # EPUB assembly
 ebooklib>=0.18
@@ -16,5 +17,5 @@ ebooklib>=0.18
 # HTML/XML generation
 lxml>=4.9.0
 
-# Utilities (difflib is stdlib — no extra package needed)
+# Utilities
 tqdm>=4.66.0

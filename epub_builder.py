@@ -255,14 +255,12 @@ def build_epub(
     nav_item.set_content(nav_html.encode("utf-8"))
     book.add_item(nav_item)
 
-    # Images
+    # Images — use .data directly (always present); deduplicate by image_id
+    added_image_ids: set = set()
     for img in images:
-        if img.saved_path is None:
+        if img.image_id in added_image_ids:
             continue
-        # Deduplicate: add each unique image_id only once
-        uid = f"image-{img.image_id}"
-        if any(getattr(i, 'id', None) == uid for i in book.items):
-            continue
+        added_image_ids.add(img.image_id)
         media_type = "image/jpeg" if img.ext == "jpg" else "image/png"
         img_item = epub.EpubItem(
             uid=uid,
