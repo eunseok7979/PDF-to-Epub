@@ -55,86 +55,105 @@ def _get_reader(lang: str):
 
 def _run_reader(reader, img_array: np.ndarray) -> list:
     """
-    Call the reader using the correct API method.
-    Returns the raw result list, or empty list on failure.
+    Call the reader using the correct API method and return a plain list.
+    Materialises generators immediately so downstream code can check truthiness
+    and iterate multiple times.
     """
-    # Try .predict() first (newer PaddleOCR), then .ocr() (older)
     for method_name, kwargs in [("predict", {}), ("ocr", {"cls": True})]:
         method = getattr(reader, method_name, None)
         if method is None:
             continue
         try:
             result = method(img_array, **kwargs)
-            if result is not None:
-                return result
         except TypeError:
-            # Wrong kwargs — try without kwargs
             try:
                 result = method(img_array)
-                if result is not None:
-                    return result
             except Exception:
                 continue
         except Exception:
             continue
+
+        if result is None:
+            continue
+
+        # predict() in PaddleOCR v3 returns a generator — materialise it now
+        if not isinstance(result, (list, dict)):
+            try:
+                result = list(result)
+            except Exception:
+                continue
+
+        return result
 
     return []
 
 
 def _extract_lines(result) -> List[Tuple[float, str]]:
     """
-    Parse PaddleOCR result into (y_centre, text) tuples.
-    Handles both old and new result formats.
+    Parse a materialised PaddleOCR result into (y_centre, text) tuples.
+
+    Handles two formats:
+      New (PaddleOCR v3): list of dicts with 'rec_texts' and 'dt_polys'
+      Old (PaddleOCR v2): list of page results, each a list of [bbox, (text, conf)]
     """
     items: List[Tuple[float, str]] = []
 
     if not result:
         return items
 
-    # Old format: list of page results, each page is list of [bbox, (text, conf)]
-    if isinstance(result, list):
-        for page_or_line in result:
-            if page_or_line is None:
-                continue
+    if not isinstance(result, list):
+        return items
 
-            # Could be a page result (list of lines) or a single line
-            if isinstance(page_or_line, list):
-                for entry in page_or_line:
-                    if entry is None:
-                        continue
+    for page_item in result:
+        if page_item is None:
+            continue
 
-                    if isinstance(entry, list) and len(entry) == 2:
-                        bbox, text_conf = entry
-                        if isinstance(text_conf, (list, tuple)) and len(text_conf) == 2:
-                            text, _conf = text_conf
-                        elif isinstance(text_conf, str):
-                            text = text_conf
-                        else:
-                            continue
+        # ------------------------------------------------------------------
+        # New format (PaddleOCR v3): dict with rec_texts / dt_polys
+        # ------------------------------------------------------------------
+        if isinstance(page_item, dict):
+            rec_texts = page_item.get("rec_texts", [])
+            dt_polys  = page_item.get("dt_polys",  [])
 
-                        try:
-                            ys = [pt[1] for pt in bbox]
-                            y_centre = sum(ys) / len(ys)
-                        except (TypeError, IndexError):
-                            y_centre = 0.0
+            for i, text in enumerate(rec_texts):
+                text = str(text).strip()
+                if not text:
+                    continue
+                y_centre = 0.0
+                if i < len(dt_polys):
+                    try:
+                        poly = list(dt_polys[i])
+                        ys = [float(pt[1]) for pt in poly]
+                        y_centre = sum(ys) / len(ys) if ys else 0.0
+                    except (TypeError, IndexError, ValueError):
+                        pass
+                items.append((y_centre, text))
+            continue
 
-                        if str(text).strip():
-                            items.append((y_centre, str(text).strip()))
-
-    # New format: might be a dict or object with attributes
-    elif hasattr(result, "rec_texts"):
-        texts = getattr(result, "rec_texts", [])
-        boxes = getattr(result, "det_boxes", [])
-        for i, text in enumerate(texts):
-            y_centre = 0.0
-            if i < len(boxes):
+        # ------------------------------------------------------------------
+        # Old format (PaddleOCR v2): page_item is a list of lines
+        # ------------------------------------------------------------------
+        if isinstance(page_item, list):
+            for entry in page_item:
+                if entry is None:
+                    continue
+                if not (isinstance(entry, list) and len(entry) == 2):
+                    continue
+                bbox, text_conf = entry
+                if isinstance(text_conf, (list, tuple)) and len(text_conf) == 2:
+                    text = str(text_conf[0]).strip()
+                elif isinstance(text_conf, str):
+                    text = text_conf.strip()
+                else:
+                    continue
+                if not text:
+                    continue
                 try:
-                    ys = [pt[1] for pt in boxes[i]]
+                    ys = [float(pt[1]) for pt in bbox]
                     y_centre = sum(ys) / len(ys)
-                except (TypeError, IndexError):
-                    pass
-            if str(text).strip():
-                items.append((y_centre, str(text).strip()))
+                except (TypeError, IndexError, ValueError):
+                    y_centre = 0.0
+                items.append((y_centre, text))
 
     return items
 

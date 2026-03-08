@@ -53,106 +53,132 @@ _engine_init_attempted = False
 
 
 def _get_engine():
-    """Lazily initialise the PPStructure layout analysis engine."""
+    """
+    Lazily initialise the layout analysis engine.
+
+    Priority:
+    1. paddlex.create_pipeline("layout_detection")  — PaddleOCR v3+
+    2. paddleocr.PPStructure                        — PaddleOCR v2 fallback
+    """
     global _engine, _engine_init_attempted
     if _engine_init_attempted:
         return _engine
     _engine_init_attempted = True
 
+    # --- Option 1: paddlex (PaddleOCR v3 / paddlepaddle 3.x) ---
     try:
-        from paddleocr import PPStructure
+        from paddlex import create_pipeline  # noqa: PLC0415
+        pipeline = create_pipeline(pipeline="layout_detection")
+        _engine = ("paddlex", pipeline)
+        logger.info("Layout analysis: paddlex layout_detection pipeline ready")
+        return _engine
+    except Exception as exc:
+        logger.debug("paddlex layout_detection unavailable: %s", exc)
+
+    # --- Option 2: PPStructure (PaddleOCR v2) ---
+    try:
+        from paddleocr import PPStructure  # noqa: PLC0415
     except ImportError:
         logger.warning(
-            "paddleocr.PPStructure not available. "
-            "Layout analysis disabled; entire page treated as one text region."
+            "Layout analysis disabled: neither paddlex nor paddleocr.PPStructure "
+            "could be imported. Entire page treated as one text region."
         )
         return None
 
-    # Try several parameter combinations (API varies across PaddleOCR versions)
     init_attempts = [
         {"table": False, "ocr": False, "layout": True, "lang": "ko"},
         {"table": False, "ocr": False, "layout": True},
-        {"table": False, "ocr": False, "lang": "ko"},
         {"table": False, "ocr": False},
         {},
     ]
-
     for kwargs in init_attempts:
         try:
-            _engine = PPStructure(**kwargs)
-            logger.info("PPStructure initialised with: %s", kwargs)
+            engine = PPStructure(**kwargs)
+            _engine = ("ppstructure", engine)
+            logger.info("Layout analysis: PPStructure initialised with %s", kwargs)
             return _engine
         except (TypeError, Exception) as exc:
             logger.debug("PPStructure(%s) failed: %s", kwargs, exc)
-            continue
 
-    logger.warning(
-        "All PPStructure init attempts failed. Layout analysis disabled."
-    )
+    logger.warning("Layout analysis disabled: all init attempts failed.")
     return None
 
 
 # ---------------------------------------------------------------------------
-# Result parsing
+# Result parsers
 # ---------------------------------------------------------------------------
 
-def _parse_result(result, page_number: int) -> List[LayoutRegion]:
-    """Parse PPStructure output into LayoutRegion objects."""
+def _parse_paddlex_result(result, page_number: int) -> List[LayoutRegion]:
+    """
+    Parse paddlex layout_detection output.
+
+    Each item yielded by pipeline.predict() contains:
+      boxes:  list of [x0, y0, x1, y1]
+      labels: list of category name strings
+      scores: list of confidence floats
+    """
     regions: List[LayoutRegion] = []
-
-    if not result:
-        return regions
-
-    items = result if isinstance(result, list) else [result]
+    # result may be a generator; materialise it
+    items = list(result) if not isinstance(result, list) else result
 
     for item in items:
-        # Handle list-of-lists (some versions nest results)
-        if isinstance(item, list):
-            regions.extend(_parse_result(item, page_number))
-            continue
+        # Support both dict-like and attribute access
+        def _get(key, default=None):
+            if isinstance(item, dict):
+                return item.get(key, default)
+            return getattr(item, key, default)
 
-        if isinstance(item, dict):
-            rtype = str(item.get("type", "text")).lower().strip()
-            bbox = item.get("bbox", None)
-            score = item.get("score", item.get("confidence", 0.0))
+        boxes  = _get("boxes",  [])
+        labels = _get("labels", [])
+        scores = _get("scores", [])
 
-            if bbox is None:
-                continue
-
-            # bbox formats: [x0,y0,x1,y1] or [[x0,y0],[x1,y0],[x1,y1],[x0,y1]]
+        for i, (box, label) in enumerate(zip(boxes, labels)):
+            score = float(scores[i]) if i < len(scores) else 0.0
             try:
-                if isinstance(bbox[0], (list, tuple)):
-                    xs = [p[0] for p in bbox]
-                    ys = [p[1] for p in bbox]
-                    x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
-                else:
-                    x0, y0, x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
-            except (IndexError, TypeError):
+                x0, y0, x1, y1 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+            except (IndexError, TypeError, ValueError):
                 continue
-
             regions.append(LayoutRegion(
-                region_type=rtype,
-                bbox=(float(x0), float(y0), float(x1), float(y1)),
-                confidence=float(score) if score else 0.0,
+                region_type=str(label).lower().strip(),
+                bbox=(x0, y0, x1, y1),
+                confidence=score,
                 page_number=page_number,
             ))
 
-        # Handle object-based results (newer PaddleOCR may return objects)
-        elif hasattr(item, "type") and hasattr(item, "bbox"):
-            rtype = str(getattr(item, "type", "text")).lower().strip()
-            bbox = getattr(item, "bbox", None)
-            score = getattr(item, "score", getattr(item, "confidence", 0.0))
-            if bbox is not None:
-                try:
-                    x0, y0, x1, y1 = float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])
-                except (IndexError, TypeError):
-                    continue
-                regions.append(LayoutRegion(
-                    region_type=rtype,
-                    bbox=(x0, y0, x1, y1),
-                    confidence=float(score) if score else 0.0,
-                    page_number=page_number,
-                ))
+    return regions
+
+
+def _parse_ppstructure_result(result, page_number: int) -> List[LayoutRegion]:
+    """Parse PPStructure (PaddleOCR v2) output."""
+    regions: List[LayoutRegion] = []
+    items = result if isinstance(result, list) else [result]
+
+    for item in items:
+        if isinstance(item, list):
+            regions.extend(_parse_ppstructure_result(item, page_number))
+            continue
+        if not isinstance(item, dict):
+            continue
+
+        rtype = str(item.get("type", "text")).lower().strip()
+        bbox  = item.get("bbox")
+        score = item.get("score", item.get("confidence", 0.0))
+        if bbox is None:
+            continue
+        try:
+            if isinstance(bbox[0], (list, tuple)):
+                xs = [p[0] for p in bbox]; ys = [p[1] for p in bbox]
+                x0, y0, x1, y1 = min(xs), min(ys), max(xs), max(ys)
+            else:
+                x0, y0, x1, y1 = bbox[0], bbox[1], bbox[2], bbox[3]
+        except (IndexError, TypeError):
+            continue
+        regions.append(LayoutRegion(
+            region_type=rtype,
+            bbox=(float(x0), float(y0), float(x1), float(y1)),
+            confidence=float(score) if score else 0.0,
+            page_number=page_number,
+        ))
 
     return regions
 
@@ -183,25 +209,29 @@ def analyze_layout(
     Falls back to a single full-page "text" region if layout analysis
     is unavailable or fails.
     """
-    engine = _get_engine()
-    if engine is None:
+    engine_info = _get_engine()
+    if engine_info is None:
         return _full_page_fallback(image, page_number)
 
+    engine_type, engine = engine_info
     img_array = np.array(image)
 
     try:
-        # Try predict() (newer API) first, then __call__() (older API)
-        try:
+        if engine_type == "paddlex":
+            # predict() is a generator — pass img_array directly
             result = engine.predict(img_array)
-        except (AttributeError, TypeError):
-            result = engine(img_array)
-
-        regions = _parse_result(result, page_number)
+            regions = _parse_paddlex_result(result, page_number)
+        else:
+            # PPStructure: try predict() then __call__()
+            try:
+                result = engine.predict(img_array)
+            except (AttributeError, TypeError):
+                result = engine(img_array)
+            regions = _parse_ppstructure_result(result, page_number)
 
         if not regions:
             return _full_page_fallback(image, page_number)
 
-        # Sort: top-to-bottom, then left-to-right
         regions.sort(key=lambda r: (r.bbox[1], r.bbox[0]))
         return regions
 
