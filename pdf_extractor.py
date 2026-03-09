@@ -89,6 +89,82 @@ def get_full_page_text(page: fitz.Page) -> str:
     return page.get_text("text").strip()
 
 
+def get_paragraph_text(
+    page: fitz.Page,
+    bbox_pixels: Tuple[float, float, float, float],
+    dpi: int,
+) -> str:
+    """
+    Extract text from a region with paragraph boundaries restored using line bboxes.
+
+    Lines whose right edge ends significantly before the region's right margin,
+    or that end with sentence-final punctuation, are treated as paragraph breaks.
+    Remaining consecutive lines are joined with a space to form a single paragraph.
+
+    Falls back to get_clip_text() if line-level data is unavailable.
+    """
+    zoom = dpi / 72.0
+    clip = fitz.Rect(
+        bbox_pixels[0] / zoom,
+        bbox_pixels[1] / zoom,
+        bbox_pixels[2] / zoom,
+        bbox_pixels[3] / zoom,
+    )
+
+    try:
+        raw = page.get_text("dict", clip=clip)
+    except Exception:
+        return page.get_text("text", clip=clip).strip()
+
+    # Collect (line_text, x1_pixels) for every non-empty line
+    line_items: List[Tuple[str, float]] = []
+    for block in raw.get("blocks", []):
+        if block.get("type") != 0:
+            continue
+        for line in block.get("lines", []):
+            spans = line.get("spans", [])
+            text = " ".join(s.get("text", "") for s in spans).strip()
+            if not text:
+                continue
+            lbbox = line.get("bbox", [0.0, 0.0, 0.0, 0.0])
+            x1_px = lbbox[2] * zoom
+            line_items.append((text, x1_px))
+
+    if not line_items:
+        return page.get_text("text", clip=clip).strip()
+
+    # Estimate right margin from 95th-percentile x1 across all lines
+    x1_vals = sorted(x for _, x in line_items)
+    idx_95 = max(0, int(len(x1_vals) * 0.95) - 1)
+    right_margin = x1_vals[idx_95]
+    short_threshold = right_margin * 0.82  # line ending before 82% → paragraph break
+
+    _SENTENCE_END = frozenset(".!?。！？")
+    _KO_ENDINGS = (
+        "다.", "다!", "다?", "습니다.", "습니다!", "입니다.",
+        "이다.", "였다.", "됩니다.", "합니다.", "했다.",
+    )
+
+    paragraphs: List[str] = []
+    current: List[str] = []
+
+    for text, x1 in line_items:
+        current.append(text)
+        is_short = x1 < short_threshold
+        ends_sentence = bool(text) and (
+            text[-1] in _SENTENCE_END
+            or any(text.endswith(e) for e in _KO_ENDINGS)
+        )
+        if is_short or ends_sentence:
+            paragraphs.append(" ".join(current))
+            current = []
+
+    if current:
+        paragraphs.append(" ".join(current))
+
+    return "\n".join(paragraphs) if paragraphs else page.get_text("text", clip=clip).strip()
+
+
 def get_font_info_in_region(
     page: fitz.Page,
     bbox_pixels: Tuple[float, float, float, float],

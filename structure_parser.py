@@ -63,6 +63,55 @@ _ENDNOTE_HEADING_RE = re.compile(
 )
 
 
+_SENTENCE_END = frozenset(".!?。！？")
+_KO_ENDINGS = (
+    "다.", "다!", "다?", "습니다.", "습니다!", "입니다.",
+    "이다.", "였다.", "됩니다.", "합니다.", "했다.",
+)
+
+
+def _restore_paragraphs(text: str) -> str:
+    """
+    Merge OCR output lines into paragraphs using text-level heuristics.
+
+    Used for scanned pages where bbox coordinates are not available.
+    Lines shorter than 70% of the median line length, or ending with
+    sentence-final punctuation, are treated as paragraph breaks.
+    Adjacent lines that don't trigger a break are joined with a space.
+    """
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if len(lines) <= 1:
+        return text.strip()
+
+    lengths = sorted(len(l) for l in lines)
+    median_len = lengths[len(lengths) // 2]
+    short_threshold = median_len * 0.70
+
+    paragraphs: List[str] = []
+    current: List[str] = []
+
+    for i, line in enumerate(lines):
+        current.append(line)
+        is_short = len(line) < short_threshold and len(lines) > 3
+        ends_sentence = bool(line) and (
+            line[-1] in _SENTENCE_END
+            or any(line.endswith(e) for e in _KO_ENDINGS)
+        )
+        next_indented = (
+            i + 1 < len(lines)
+            and len(lines[i + 1]) > 0
+            and lines[i + 1][0] in (" ", "\t", "\u3000", "\u00a0")
+        )
+        if is_short or ends_sentence or next_indented:
+            paragraphs.append(" ".join(current))
+            current = []
+
+    if current:
+        paragraphs.append(" ".join(current))
+
+    return "\n".join(paragraphs)
+
+
 def _extract_note_id(text: str, prefix: str) -> Tuple[str, str]:
     """Extract marker from the start of a note. Returns (note_id, remaining text)."""
     m = _NOTE_MARKER_RE.match(text.strip())
@@ -212,30 +261,39 @@ def build_blocks(
                 ))
                 continue
 
-        # --- Footnote detection (note marker at start of text) ---
+        # --- Footnote detection or paragraph restoration ---
         lines = [l.strip() for l in text.splitlines() if l.strip()]
-        any_footnote = False
-        for line in lines:
-            if _NOTE_MARKER_RE.match(line):
-                _, note_text = _extract_note_id(line, "fn")
-                blocks.append(Block(
-                    block_type="footnote",
-                    text=note_text,
-                    note_id=f"fn-{footnote_counter}",
-                    page_number=rb.page_number,
-                ))
-                footnote_counter += 1
-                any_footnote = True
-            else:
-                blocks.append(Block(
-                    block_type="paragraph",
-                    text=line,
-                    page_number=rb.page_number,
-                ))
+        has_footnotes = any(_NOTE_MARKER_RE.match(l) for l in lines)
 
-        if not any_footnote and len(lines) <= 1:
-            # Already appended as paragraph above; nothing extra to do
-            pass
+        if has_footnotes:
+            # Process line-by-line to capture footnote markers
+            for line in lines:
+                if _NOTE_MARKER_RE.match(line):
+                    _, note_text = _extract_note_id(line, "fn")
+                    blocks.append(Block(
+                        block_type="footnote",
+                        text=note_text,
+                        note_id=f"fn-{footnote_counter}",
+                        page_number=rb.page_number,
+                    ))
+                    footnote_counter += 1
+                else:
+                    blocks.append(Block(
+                        block_type="paragraph",
+                        text=line,
+                        page_number=rb.page_number,
+                    ))
+        else:
+            # Restore paragraph structure from line-level OCR output
+            restored = _restore_paragraphs(text)
+            for para in restored.splitlines():
+                para = para.strip()
+                if para:
+                    blocks.append(Block(
+                        block_type="paragraph",
+                        text=para,
+                        page_number=rb.page_number,
+                    ))
 
     return blocks
 

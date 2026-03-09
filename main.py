@@ -122,8 +122,9 @@ def convert(
         for region in text_regions:
             bbox = region.bbox
 
-            # Native text via PyMuPDF clip (pixel coords -> PDF coords)
-            native_text = pdf_extractor.get_clip_text(fitz_page, bbox, dpi)
+            # Native text via PyMuPDF clip with paragraph restoration
+            # (born-digital pages: uses line bboxes; scanned pages: fallback)
+            native_text = pdf_extractor.get_paragraph_text(fitz_page, bbox, dpi)
 
             # Crop the region image for OCR engines
             region_image = layout_analyzer.crop_region(rendered, bbox)

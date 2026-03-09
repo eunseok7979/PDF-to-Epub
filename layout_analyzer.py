@@ -1,7 +1,7 @@
 """
 layout_analyzer.py
 ------------------
-Page layout analysis using PaddleOCR PP-StructureV2.
+Page layout analysis using PaddleX PP-DocLayout-M (layout_parsing pipeline).
 
 Detects region types on each page:
   - header, footer, page_number  -> discarded (not included in EPUB)
@@ -17,11 +17,15 @@ from __future__ import annotations
 
 import dataclasses
 import logging
+import os
 import warnings
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 from PIL import Image
+
+# Skip the slow model-source-availability check at startup
+os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 logger = logging.getLogger(__name__)
 
@@ -57,23 +61,41 @@ def _get_engine():
     Lazily initialise the layout analysis engine.
 
     Priority:
-    1. paddlex.create_pipeline("layout_detection")  — PaddleOCR v3+
-    2. paddleocr.PPStructure                        — PaddleOCR v2 fallback
+    1. paddlex layout_parsing pipeline with PP-DocLayout-M  — PaddleOCR v3+
+    2. paddleocr.PPStructure                                — PaddleOCR v2 fallback
     """
     global _engine, _engine_init_attempted
     if _engine_init_attempted:
         return _engine
     _engine_init_attempted = True
 
-    # --- Option 1: paddlex (PaddleOCR v3 / paddlepaddle 3.x) ---
+    # --- Option 1: paddlex with PP-DocLayout-M (PaddleOCR v3 / paddlepaddle 3.x) ---
     try:
         from paddlex import create_pipeline  # noqa: PLC0415
-        pipeline = create_pipeline(pipeline="layout_detection")
+
+        # Try to configure PP-DocLayout-M via load_pipeline_config
+        pipeline = None
+        try:
+            from paddlex.inference.pipelines import load_pipeline_config  # noqa: PLC0415
+            config = load_pipeline_config("layout_parsing")
+            try:
+                config["SubModules"]["LayoutDetection"]["model_name"] = "PP-DocLayout-M"
+            except (KeyError, TypeError):
+                pass  # config structure may differ; proceed with default
+            pipeline = create_pipeline(config=config)
+            logger.info("Layout analysis: paddlex layout_parsing + PP-DocLayout-M ready")
+        except Exception as exc:
+            logger.debug("load_pipeline_config failed (%s); trying create_pipeline directly", exc)
+
+        if pipeline is None:
+            pipeline = create_pipeline(pipeline="layout_parsing")
+            logger.info("Layout analysis: paddlex layout_parsing pipeline ready (default model)")
+
         _engine = ("paddlex", pipeline)
-        logger.info("Layout analysis: paddlex layout_detection pipeline ready")
         return _engine
+
     except Exception as exc:
-        logger.debug("paddlex layout_detection unavailable: %s", exc)
+        logger.debug("paddlex layout_parsing unavailable: %s", exc)
 
     # --- Option 2: PPStructure (PaddleOCR v2) ---
     try:
@@ -110,30 +132,63 @@ def _get_engine():
 
 def _parse_paddlex_result(result, page_number: int) -> List[LayoutRegion]:
     """
-    Parse paddlex layout_detection output.
+    Parse paddlex layout_parsing output.
 
-    Each item yielded by pipeline.predict() contains:
-      boxes:  list of [x0, y0, x1, y1]
-      labels: list of category name strings
-      scores: list of confidence floats
+    PaddleX v3 pipeline.predict() yields items. Each item is typically a dict
+    with structure:
+      item['layout_det_res']['boxes'] = [
+          {'cls_id': int, 'label': str, 'score': float,
+           'coordinate': [x0, y0, x1, y1]},
+          ...
+      ]
+
+    Older paddlex formats may use top-level 'boxes'/'labels'/'scores' keys.
     """
     regions: List[LayoutRegion] = []
-    # result may be a generator; materialise it
+    # result may be a generator — materialise it
     items = list(result) if not isinstance(result, list) else result
 
     for item in items:
-        # Support both dict-like and attribute access
-        def _get(key, default=None):
-            if isinstance(item, dict):
-                return item.get(key, default)
-            return getattr(item, key, default)
+        if item is None:
+            continue
 
-        boxes  = _get("boxes",  [])
-        labels = _get("labels", [])
-        scores = _get("scores", [])
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
 
-        for i, (box, label) in enumerate(zip(boxes, labels)):
-            score = float(scores[i]) if i < len(scores) else 0.0
+        # --- PaddleX v3: item['layout_det_res']['boxes'] ---
+        det_res = _get(item, "layout_det_res")
+        if det_res is not None:
+            boxes = _get(det_res, "boxes", [])
+            for box_info in (boxes or []):
+                if not isinstance(box_info, dict):
+                    continue
+                label = str(box_info.get("label", "text")).lower().strip()
+                score = float(box_info.get("score", 0.0))
+                coord = box_info.get("coordinate", [])
+                try:
+                    x0 = float(coord[0])
+                    y0 = float(coord[1])
+                    x1 = float(coord[2])
+                    y1 = float(coord[3])
+                except (IndexError, TypeError, ValueError):
+                    continue
+                regions.append(LayoutRegion(
+                    region_type=label,
+                    bbox=(x0, y0, x1, y1),
+                    confidence=score,
+                    page_number=page_number,
+                ))
+            continue
+
+        # --- Older paddlex: top-level boxes/labels/scores ---
+        boxes  = _get(item, "boxes",  [])
+        labels = _get(item, "labels", [])
+        scores = _get(item, "scores", [])
+
+        for i, (box, label) in enumerate(zip(boxes or [], labels or [])):
+            score = float(scores[i]) if scores and i < len(scores) else 0.0
             try:
                 x0, y0, x1, y1 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
             except (IndexError, TypeError, ValueError):

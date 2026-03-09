@@ -263,7 +263,7 @@ def build_epub(
         added_image_ids.add(img.image_id)
         media_type = "image/jpeg" if img.ext == "jpg" else "image/png"
         img_item = epub.EpubItem(
-            uid=uid,
+            uid=f"image-{img.image_id}",
             file_name=f"images/{img.image_id}.{img.ext}",
             media_type=media_type,
             content=img.data,
