@@ -41,7 +41,7 @@ class LayoutRegion:
 
 # Region type classification
 DISCARD_TYPES = frozenset({"header", "footer", "page_number"})
-FIGURE_TYPES = frozenset({"figure", "table"})
+FIGURE_TYPES = frozenset({"figure", "table", "image"})
 TEXT_TYPES = frozenset({
     "text", "title", "reference", "equation",
     "figure_caption", "table_caption",

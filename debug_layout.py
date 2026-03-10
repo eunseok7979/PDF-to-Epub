@@ -24,7 +24,7 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 # Mirror of layout_analyzer.DISCARD_TYPES / FIGURE_TYPES / TEXT_TYPES
 DISCARD_TYPES = frozenset({"header", "footer", "page_number"})
-FIGURE_TYPES  = frozenset({"figure", "table"})
+FIGURE_TYPES  = frozenset({"figure", "table", "image"})
 
 
 def _init_pipeline():
