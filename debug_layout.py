@@ -39,15 +39,21 @@ def main():
     print(f"    Image size: {img.width}x{img.height}")
 
     # --- Run layout analysis ---
-    print(f"[2] Running paddlex layout_parsing pipeline ...")
-    try:
-        from paddlex import create_pipeline
-        pipeline = create_pipeline(pipeline="layout_parsing")
-        result = pipeline.predict(img_array)
-        items = list(result)
-        print(f"    Got {len(items)} item(s) from predict()")
-    except Exception as e:
-        print(f"    ERROR: {e}")
+    # Try layout_detection first (no OCR deps), fall back to layout_parsing
+    for pipeline_name in ("layout_detection", "layout_parsing"):
+        print(f"[2] Trying paddlex pipeline: {pipeline_name!r} ...")
+        try:
+            from paddlex import create_pipeline
+            pipeline = create_pipeline(pipeline=pipeline_name)
+            result = pipeline.predict(img_array)
+            items = list(result)
+            print(f"    OK — got {len(items)} item(s)")
+            break
+        except Exception as e:
+            print(f"    FAILED: {e}")
+            items = []
+    else:
+        print("Both pipelines failed. Exiting.")
         sys.exit(1)
 
     # --- Dump raw structure ---
