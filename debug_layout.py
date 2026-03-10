@@ -23,8 +23,9 @@ os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 
 # Mirror of layout_analyzer.DISCARD_TYPES / FIGURE_TYPES / TEXT_TYPES
-DISCARD_TYPES = frozenset({"header", "footer", "page_number"})
+DISCARD_TYPES = frozenset({"header", "footer", "page_number", "number"})
 FIGURE_TYPES  = frozenset({"figure", "table", "image"})
+MIN_CONFIDENCE = 0.5
 
 
 def _init_pipeline():
@@ -141,11 +142,14 @@ def main():
     # ------------------------------------------------------------------
     # [5] filter_regions() simulation
     # ------------------------------------------------------------------
-    print(f"\n[5] filter_regions() classification:")
-    text_count = figure_count = discard_count = unknown_count = 0
+    print(f"\n[5] filter_regions() classification (MIN_CONFIDENCE={MIN_CONFIDENCE}):")
+    text_count = figure_count = discard_count = skipped_count = 0
     for label, score, coord in all_boxes:
         label_lower = label.lower().strip()
-        if label_lower in DISCARD_TYPES:
+        if score < MIN_CONFIDENCE:
+            tag = "SKIP   "
+            skipped_count += 1
+        elif label_lower in DISCARD_TYPES:
             tag = "DISCARD"
             discard_count += 1
         elif label_lower in FIGURE_TYPES:
@@ -156,7 +160,7 @@ def main():
             text_count += 1
         print(f"    [{tag}]  {label!r:25s} score={score:.3f}")
 
-    print(f"\n    Summary: {text_count} text  |  {figure_count} figure  |  {discard_count} discard")
+    print(f"\n    Summary: {text_count} text  |  {figure_count} figure  |  {discard_count} discard  |  {skipped_count} skipped")
     if text_count + figure_count + discard_count == 0:
         print("    WARNING: no boxes detected — production will use full-page fallback")
 

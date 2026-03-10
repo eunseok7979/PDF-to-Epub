@@ -40,12 +40,15 @@ class LayoutRegion:
 
 
 # Region type classification
-DISCARD_TYPES = frozenset({"header", "footer", "page_number"})
+DISCARD_TYPES = frozenset({"header", "footer", "page_number", "number"})
 FIGURE_TYPES = frozenset({"figure", "table", "image"})
 TEXT_TYPES = frozenset({
     "text", "title", "reference", "equation",
     "figure_caption", "table_caption",
 })
+
+# Minimum confidence score to accept a detected region
+MIN_CONFIDENCE = 0.5
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +286,9 @@ def analyze_layout(
             except (AttributeError, TypeError):
                 result = engine(img_array)
             regions = _parse_ppstructure_result(result, page_number)
+
+        # Filter out low-confidence detections
+        regions = [r for r in regions if r.confidence >= MIN_CONFIDENCE]
 
         if not regions:
             return _full_page_fallback(image, page_number)
