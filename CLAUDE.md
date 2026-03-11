@@ -37,10 +37,10 @@
 ```
 PDF 입력
   │
-  ├─ PaddleX (PP-DocLayout-M) ─→ 레이아웃 분석 (게이트키퍼)
-  │   23개 카테고리: text, table, figure, header, footer 등
-  │   파이프라인: layout_parsing
-  │   환경변수: PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+  ├─ Surya (1순위) / PaddleX (fallback) ─→ 레이아웃 분석 (게이트키퍼)
+  │   Surya: 14개 카테고리 (Picture, Text, Caption, PageHeader 등)
+  │   surya-ocr 0.16.0 (0.17.1은 transformers 호환 문제)
+  │   위치 기반 header/footer 필터링: 상단 8% / 하단 10%
   │
   ├─ A: PyMuPDF ──→ 네이티브 텍스트 추출 (앵커 역할)
   ├─ B: Tesseract ─→ OCR 텍스트
@@ -80,13 +80,16 @@ PDF 입력
 | PaddleOCR API 변경 | `show_log` 제거, `.ocr()` → `.predict()` |
 | PaddlePaddle 3.3.0 oneDNN 비호환 | 3.0.0으로 다운그레이드 |
 | PaddleX 파이프라인명 | `layout_detection` → `layout_parsing` |
-| 레이아웃 모델 | `PicoDet_layout_1x` 실패 → `PP-DocLayout-M` 사용 |
+| 레이아웃 모델 | PP-DocLayout-M이 figure/text 반대 분류 → **Surya로 교체** |
 | PyMuPDF API | `get_text("rawdict")` → `get_text("dict")` |
 | Tesseract PATH | Windows GUI에서 수동 추가 |
 | EasyOCR 언어 설정 | `["ko", "en"]` (ch_tra 제외) |
+| EPUB 이미지 | `src` 경로 오류 + figure type 불일치 수정 |
+| header/footer 혼입 | Surya 분류 + 위치 기반 휴리스틱(상단8%/하단10%) |
 
 ## 현재 상태
 
-- PP-DocLayout-M: text, number, header 인식 확인됨
-- **미해결**: figure, table, footer 등 인식 실패 — 원인 조사 필요
-- PaddleX v3 결과 구조: `item['layout_det_res']['boxes'][i]` with keys `coordinate`, `label`, `score`; 이전 flat `boxes/labels/scores` 포맷도 fallback으로 유지
+- **레이아웃 분석**: Surya (1순위) — figure, text, caption, header/footer 정확 분류 확인
+- **EPUB 이미지**: 정상 렌더링 확인 (50페이지 테스트)
+- **최우선 과제**: OCR 텍스트 품질 향상 (투표 시스템 구현)
+- `surya-ocr` 0.16.0 사용 (0.17.1은 transformers 5.x 호환 문제)

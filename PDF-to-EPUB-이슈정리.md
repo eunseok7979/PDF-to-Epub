@@ -1,6 +1,6 @@
 # PDF-to-EPUB Converter — 이슈 정리
 
-최종 업데이트: 2026-03-11
+최종 업데이트: 2026-03-12
 
 ---
 
@@ -95,9 +95,10 @@
 - **설계 원칙**: 네이티브 텍스트(A)가 더 정확하다는 가정 없음. 투표 시스템이 A 단독보다 나은 결과를 내야 함.
 
 ### 4.2 레이아웃 분석 역할
-- PaddleX (PP-DocLayout-M)가 게이트키퍼 역할
+- **Surya** (1순위) 또는 PaddleX (fallback)가 게이트키퍼 역할
 - 페이지 내 영역을 text, figure, table, header, footer 등으로 분류
 - 분류 결과에 따라 각 영역별 처리 방식 결정
+- PP-DocLayout-M → Surya 교체 이유: PP-DocLayout-M이 figure와 text를 반대로 분류하는 치명적 오류 발견
 
 ### 4.3 문단 복원 전략
 - **Born-digital (pdf_extractor.py)**: bbox 기반 — per-line bbox + 오른쪽 마진 + short-line 감지
@@ -105,29 +106,53 @@
 
 ---
 
-## 5. 미해결 과제
+## 5. 해결된 이슈 (2026-03-11)
 
-### 5.1 PP-DocLayout-M 카테고리 인식 문제 (부분 해결)
-- **작동 확인**: text, number, header, image (figure)
-- **해결**: 모델이 figure를 `"image"` 레이블로 출력 — `FIGURE_TYPES`에 `"image"` 추가하여 해결
-- **미확인**: table, footer, 기타 (23개 중 대부분 미검증)
-- **다음 단계**: 다양한 레이아웃의 테스트 PDF로 나머지 카테고리 체계적 테스트
+### 5.1 PP-DocLayout-M → Surya 교체 (해결)
+- **증상**: PP-DocLayout-M이 figure(그림)를 text로, text를 image로 반대 분류
+- **디버깅**: `debug_layout.py`로 bbox 시각화하여 확인
+- **해결**: Surya LayoutPredictor로 교체 (`surya-ocr` 0.16.0)
+  - 14개 카테고리: Text, Picture, Figure, Caption, SectionHeader, PageHeader, PageFooter 등
+  - 라벨 정규화: PascalCase → lowercase (예: `Picture` → `picture`)
+  - PaddleX는 fallback으로 유지
+- **주의**: `surya-ocr` 0.17.1은 `transformers` 5.x와 호환 문제 발생 → 0.16.0 사용
 
-### 5.2 삼중 OCR 투표 시스템
-- 아키텍처 결정은 완료, 구현 및 실제 검증 필요
+### 5.2 EPUB 이미지 렌더링 (해결)
+- **증상 1**: 이미지가 `img_0001` 텍스트로 표시됨
+  - **원인**: `structure_parser.py`의 figure type 체크에 `"image"`, `"picture"` 누락
+  - **해결**: `FIGURE_REGION_TYPES` 공유 set 도입하여 불일치 방지
+- **증상 2**: 이미지 태그는 생성되나 로딩 실패
+  - **원인**: `epub_builder.py`에서 `src="../images/"` 경로 오류 (content.xhtml이 루트에 있으므로 `../` 불필요)
+  - **해결**: `src="images/"` 로 수정
 
-### 5.3 페이지 하단 제목/번호가 본문에 삽입되는 문제
-- **증상**: 페이지 번호("26")와 책 제목("A COMPANION TO MARX'S CAPITAL") 등 header/footer 텍스트가 EPUB 본문에 포함됨
-- **원인 1**: 레이아웃 분석이 실패하면 전체 페이지가 하나의 text 영역으로 처리됨
-- **원인 2**: 레이아웃 분석이 작동하더라도 header/footer가 `text`/`title`로 잘못 분류될 수 있음
-- **다음 단계**: 위치 기반 휴리스틱(페이지 상/하단 영역 필터링) 또는 텍스트 패턴 매칭으로 제거
+### 5.3 페이지 하단 제목/번호가 본문에 삽입되는 문제 (부분 해결)
+- **해결 1**: Surya가 PageHeader/PageFooter를 정확히 분류 → DISCARD_TYPES에 추가
+- **해결 2**: 위치 기반 휴리스틱 추가 — 페이지 상단 8% / 하단 10% 에 있는 짧은 텍스트(높이 < 3%) 자동 discard
+- **미해결**: 여러 페이지 간 반복 텍스트 패턴 감지 (Phase 2)
 
-### 5.4 Linux 환경에서 PaddleX 레이아웃 분석 초기화 실패
-- **증상**: `Layout analysis disabled: neither paddlex nor paddleocr.PPStructure could be imported`
-- **상황**: PaddleX import는 성공하지만 파이프라인 생성 시 실패
-- **참고**: paddlepaddle 3.3.0이 설치됨 (Windows에서는 3.0.0만 호환, Linux에서는 미검증)
+### 5.4 GitHub SSH 인증 설정 (해결)
+- Linux 환경에서 HTTPS 인증 실패 → SSH 키 생성 및 등록
+- remote URL: `https://` → `git@github.com:` 변경
 
-### 5.5 EPUB 출력 품질
+---
+
+## 6. 미해결 과제
+
+### 6.1 텍스트 품질 향상 — OCR 투표 시스템 (최우선)
+- 현재 OCR 출력 품질이 낮음: 글자 오인식, 띄어쓰기 손실, 문장 누락
+- **삼중 OCR 투표 시스템**: 아키텍처 결정은 완료, 구현 및 검증 필요
+- **Surya OCR 추가 검토**: 4번째 후보로 추가하여 4중 투표 시스템으로 확장 가능
+- **GLM-OCR 조사**: Reddit에서 좋은 평가, AI 기반 OCR로 추가 후보 가능성
+
+### 6.2 여러 페이지 간 반복 텍스트 패턴 감지
+- header/footer가 모델에 의해 text로 분류될 경우, 여러 페이지에서 동일 텍스트가 반복되면 discard
+- `main.py` 파이프라인 레벨에서 구현 필요
+
+### 6.3 Linux 환경에서 Surya/PaddleX 호환성
+- Linux에서 Surya 동작 여부 미검증
+- PaddleX는 Linux에서 초기화 실패 이력 있음 (paddlepaddle 3.3.0)
+
+### 6.4 EPUB 출력 품질
 - reflowable EPUB의 실제 렌더링 품질 검증 미완료
 
 ---
