@@ -1,6 +1,6 @@
 # PDF-to-EPUB Converter — 이슈 정리
 
-최종 업데이트: 2026-03-10
+최종 업데이트: 2026-03-11
 
 ---
 
@@ -70,6 +70,7 @@
 ### 3.3 main.py
 - `get_clip_text()` → `get_paragraph_text()`로 교체
 - born-digital 페이지에서 bbox 기반 문단 복원 적용
+- `--pages` CLI 옵션 추가: 특정 페이지 또는 범위만 처리 (예: `--pages 50`, `--pages 10-20`)
 
 ### 3.4 structure_parser.py
 - `_restore_paragraphs()` 추가:
@@ -115,7 +116,18 @@
 ### 5.2 삼중 OCR 투표 시스템
 - 아키텍처 결정은 완료, 구현 및 실제 검증 필요
 
-### 5.3 EPUB 출력 품질
+### 5.3 페이지 하단 제목/번호가 본문에 삽입되는 문제
+- **증상**: 페이지 번호("26")와 책 제목("A COMPANION TO MARX'S CAPITAL") 등 header/footer 텍스트가 EPUB 본문에 포함됨
+- **원인 1**: 레이아웃 분석이 실패하면 전체 페이지가 하나의 text 영역으로 처리됨
+- **원인 2**: 레이아웃 분석이 작동하더라도 header/footer가 `text`/`title`로 잘못 분류될 수 있음
+- **다음 단계**: 위치 기반 휴리스틱(페이지 상/하단 영역 필터링) 또는 텍스트 패턴 매칭으로 제거
+
+### 5.4 Linux 환경에서 PaddleX 레이아웃 분석 초기화 실패
+- **증상**: `Layout analysis disabled: neither paddlex nor paddleocr.PPStructure could be imported`
+- **상황**: PaddleX import는 성공하지만 파이프라인 생성 시 실패
+- **참고**: paddlepaddle 3.3.0이 설치됨 (Windows에서는 3.0.0만 호환, Linux에서는 미검증)
+
+### 5.5 EPUB 출력 품질
 - reflowable EPUB의 실제 렌더링 품질 검증 미완료
 
 ---

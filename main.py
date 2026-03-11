@@ -63,6 +63,7 @@ def convert(
     dpi: int,
     tesseract_lang: str,
     images_dir: Path,
+    page_range: tuple | None = None,
 ) -> None:
 
     # ==================================================================
@@ -75,6 +76,12 @@ def convert(
     digital_count = total_pages - scanned_count
     print(f"      {total_pages} pages  "
           f"({digital_count} born-digital/embedded-OCR, {scanned_count} pure-scan)")
+
+    # Filter to requested page range
+    if page_range:
+        start, end = page_range
+        pages = [p for p in pages if start <= p.page_number < end]
+        print(f"      Processing pages {start + 1}-{end} ({len(pages)} page(s))")
 
     # Keep a fitz.Document open for clip-based text extraction
     doc = pdf_extractor.open_pdf(input_pdf)
@@ -237,6 +244,10 @@ def main() -> None:
         help="Tesseract language string (default: kor+eng)"
     )
     parser.add_argument(
+        "--pages", default=None, metavar="RANGE",
+        help="Page range to process, e.g. '50' or '10-20' (1-based, default: all)"
+    )
+    parser.add_argument(
         "--ocr-log", default=None, metavar="FILE",
         help="Write OCR discrepancy warnings to FILE"
     )
@@ -262,6 +273,16 @@ def main() -> None:
     else:
         images_dir = output_epub.parent / (output_epub.stem + ".images")
 
+    # Parse --pages
+    page_range = None
+    if args.pages:
+        if "-" in args.pages:
+            start, end = args.pages.split("-", 1)
+            page_range = (int(start) - 1, int(end))  # convert to 0-based start
+        else:
+            p = int(args.pages) - 1  # convert to 0-based
+            page_range = (p, p + 1)
+
     convert(
         input_pdf=input_pdf,
         output_epub=output_epub,
@@ -270,6 +291,7 @@ def main() -> None:
         dpi=args.dpi,
         tesseract_lang=args.lang,
         images_dir=images_dir,
+        page_range=page_range,
     )
 
 
