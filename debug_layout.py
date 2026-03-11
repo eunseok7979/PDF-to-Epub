@@ -164,6 +164,51 @@ def main():
     if text_count + figure_count + discard_count == 0:
         print("    WARNING: no boxes detected — production will use full-page fallback")
 
+    # ------------------------------------------------------------------
+    # [6] Save annotated debug image
+    # ------------------------------------------------------------------
+    print(f"\n[6] Saving annotated debug image ...")
+    from PIL import ImageDraw, ImageFont
+    debug_img = img.copy()
+    draw = ImageDraw.Draw(debug_img)
+
+    # Color per classification
+    COLORS = {
+        "FIGURE": (255, 0, 0),      # red
+        "TEXT": (0, 0, 255),         # blue
+        "DISCARD": (160, 160, 160),  # grey
+        "SKIP": (200, 200, 0),       # yellow
+    }
+
+    for label, score, coord in all_boxes:
+        label_lower = label.lower().strip()
+        if score < MIN_CONFIDENCE:
+            tag = "SKIP"
+        elif label_lower in DISCARD_TYPES:
+            tag = "DISCARD"
+        elif label_lower in FIGURE_TYPES:
+            tag = "FIGURE"
+        else:
+            tag = "TEXT"
+
+        color = COLORS[tag]
+        try:
+            x0, y0, x1, y1 = float(coord[0]), float(coord[1]), float(coord[2]), float(coord[3])
+        except (IndexError, TypeError, ValueError):
+            continue
+
+        # Draw bbox (3px thick)
+        for offset in range(3):
+            draw.rectangle([x0 - offset, y0 - offset, x1 + offset, y1 + offset], outline=color)
+
+        # Draw label text
+        caption = f"{label} ({score:.2f}) [{tag}]"
+        draw.text((x0 + 4, y0 + 4), caption, fill=color)
+
+    out_name = f"debug_page{page_num + 1}.png"
+    debug_img.save(out_name)
+    print(f"    Saved: {out_name}")
+
     print("\n[Done]")
 
 
