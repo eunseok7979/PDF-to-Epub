@@ -1,78 +1,224 @@
 """
 debug_layout.py
 ---------------
-Diagnostic script: render one page and dump raw PP-DocLayout-M output.
+Diagnostic script: render one page and dump layout analysis output.
 
-Uses the SAME pipeline initialisation as layout_analyzer.py (production):
-  1. load_pipeline_config("layout_parsing") + PP-DocLayout-M override
-  2. Fallback: create_pipeline(pipeline="layout_parsing") with default model
+Supports two engines:
+  --engine paddlex  (default) PP-DocLayout-M via PaddleX
+  --engine surya    Surya layout detection
 
 Usage:
     python debug_layout.py test.pdf 50
-
-Prints every detected box with label, score, and coordinates,
-then shows how filter_regions() would classify each one.
+    python debug_layout.py test.pdf 50 --engine surya
 """
 
 from __future__ import annotations
 
+import argparse
 import sys
 import os
 
 os.environ.setdefault("PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK", "True")
 
 
-# Mirror of layout_analyzer.DISCARD_TYPES / FIGURE_TYPES / TEXT_TYPES
-DISCARD_TYPES = frozenset({"header", "footer", "page_number", "number"})
-FIGURE_TYPES  = frozenset({"figure", "table", "image"})
-MIN_CONFIDENCE = 0.5
+# Classification sets (used for both engines after label normalisation)
+DISCARD_LABELS = frozenset({
+    "header", "footer", "page_number", "number",
+    "pageheader", "pagefooter",
+})
+FIGURE_LABELS = frozenset({
+    "figure", "table", "image", "picture",
+})
+MIN_CONFIDENCE = 0.3
 
 
-def _init_pipeline():
-    """
-    Initialise layout_parsing pipeline exactly as layout_analyzer.py does.
-    Returns (pipeline, description_str).
-    """
+# ---------------------------------------------------------------------------
+# Engine: PaddleX (PP-DocLayout-M)
+# ---------------------------------------------------------------------------
+
+def _run_paddlex(img, img_array, page_num):
+    """Run PaddleX layout analysis. Returns list of (label, score, [x0,y0,x1,y1])."""
+    import numpy as np
     from paddlex import create_pipeline
 
-    # --- Option 1: layout_parsing + PP-DocLayout-M (same as production) ---
+    pipeline = None
     try:
         from paddlex.inference.pipelines import load_pipeline_config
         config = load_pipeline_config("layout_parsing")
         try:
             config["SubModules"]["LayoutDetection"]["model_name"] = "PP-DocLayout-M"
-        except (KeyError, TypeError) as e:
-            print(f"    [warn] Could not set PP-DocLayout-M in config: {e}")
+        except (KeyError, TypeError):
+            pass
         pipeline = create_pipeline(config=config)
-        return pipeline, "layout_parsing + PP-DocLayout-M (production path 1)"
+        print("    Pipeline: layout_parsing + PP-DocLayout-M")
     except Exception as e:
-        print(f"    [warn] load_pipeline_config path failed: {e}")
+        print(f"    [warn] config path failed: {e}")
 
-    # --- Option 2: layout_parsing default model (production fallback) ---
-    try:
+    if pipeline is None:
         pipeline = create_pipeline(pipeline="layout_parsing")
-        return pipeline, "layout_parsing default model (production path 2)"
-    except Exception as e:
-        print(f"    [error] layout_parsing also failed: {e}")
-        return None, "FAILED"
+        print("    Pipeline: layout_parsing (default model)")
 
+    result = pipeline.predict(img_array)
+    items = list(result)
+
+    all_boxes = []
+    for item in items:
+        def _get(obj, key, default=None):
+            if isinstance(obj, dict):
+                return obj.get(key, default)
+            return getattr(obj, key, default)
+
+        det_res = _get(item, "layout_det_res")
+        if det_res is not None:
+            boxes = _get(det_res, "boxes", [])
+            for box in (boxes or []):
+                if not isinstance(box, dict):
+                    continue
+                label = str(box.get("label", "?"))
+                score = float(box.get("score", 0))
+                coord = box.get("coordinate", [])
+                try:
+                    c = [float(coord[0]), float(coord[1]), float(coord[2]), float(coord[3])]
+                except (IndexError, TypeError, ValueError):
+                    continue
+                all_boxes.append((label, score, c))
+        else:
+            boxes = _get(item, "boxes", [])
+            labels = _get(item, "labels", [])
+            scores = _get(item, "scores", [])
+            for j, (box, label) in enumerate(zip(boxes or [], labels or [])):
+                score = float(scores[j]) if scores and j < len(scores) else 0
+                try:
+                    c = [float(box[0]), float(box[1]), float(box[2]), float(box[3])]
+                except (IndexError, TypeError, ValueError):
+                    continue
+                all_boxes.append((str(label), score, c))
+
+    return all_boxes
+
+
+# ---------------------------------------------------------------------------
+# Engine: Surya
+# ---------------------------------------------------------------------------
+
+def _run_surya(img, img_array, page_num):
+    """Run Surya layout detection. Returns list of (label, score, [x0,y0,x1,y1])."""
+    from surya.layout import LayoutPredictor
+
+    print("    Loading Surya layout model ...")
+    predictor = LayoutPredictor()
+    print("    Running layout detection ...")
+    results = predictor([img])
+
+    all_boxes = []
+    for box in results[0].bboxes:
+        label = box.label
+        score = box.confidence if box.confidence is not None else 0.0
+        bbox = box.bbox  # [x_min, y_min, x_max, y_max]
+        all_boxes.append((label, score, bbox))
+
+    return all_boxes
+
+
+# ---------------------------------------------------------------------------
+# Classification + visualisation (shared)
+# ---------------------------------------------------------------------------
+
+def _classify(label):
+    """Return tag: FIGURE, TEXT, DISCARD, or SKIP."""
+    key = label.lower().replace("-", "").replace("_", "").strip()
+    if key in DISCARD_LABELS:
+        return "DISCARD"
+    elif key in FIGURE_LABELS:
+        return "FIGURE"
+    else:
+        return "TEXT"
+
+
+def _print_results(all_boxes):
+    """Print detected boxes and classification summary."""
+    print(f"\n[4] Detected regions:")
+    text_count = figure_count = discard_count = skipped_count = 0
+
+    for label, score, coord in all_boxes:
+        if score < MIN_CONFIDENCE:
+            tag = "SKIP"
+            skipped_count += 1
+        else:
+            tag = _classify(label)
+            if tag == "DISCARD":
+                discard_count += 1
+            elif tag == "FIGURE":
+                figure_count += 1
+            else:
+                text_count += 1
+
+        print(f"    [{tag:7s}]  {label!r:25s} score={score:.3f}  "
+              f"bbox=[{coord[0]:.0f}, {coord[1]:.0f}, {coord[2]:.0f}, {coord[3]:.0f}]")
+
+    print(f"\n    Summary: {text_count} text  |  {figure_count} figure  |  "
+          f"{discard_count} discard  |  {skipped_count} skipped")
+
+
+def _save_debug_image(img, all_boxes, page_num, engine_name):
+    """Draw annotated bboxes and save as PNG."""
+    from PIL import ImageDraw
+
+    COLORS = {
+        "FIGURE": (255, 0, 0),      # red
+        "TEXT": (0, 0, 255),         # blue
+        "DISCARD": (160, 160, 160),  # grey
+        "SKIP": (200, 200, 0),       # yellow
+    }
+
+    debug_img = img.copy()
+    draw = ImageDraw.Draw(debug_img)
+
+    for label, score, coord in all_boxes:
+        tag = "SKIP" if score < MIN_CONFIDENCE else _classify(label)
+        color = COLORS[tag]
+
+        x0, y0, x1, y1 = coord[0], coord[1], coord[2], coord[3]
+
+        # Draw bbox (3px thick)
+        for offset in range(3):
+            draw.rectangle([x0 - offset, y0 - offset, x1 + offset, y1 + offset],
+                           outline=color)
+
+        caption = f"{label} ({score:.2f}) [{tag}]"
+        draw.text((x0 + 4, y0 + 4), caption, fill=color)
+
+    out_name = f"debug_page{page_num + 1}_{engine_name}.png"
+    debug_img.save(out_name)
+    print(f"\n[5] Saved: {out_name}")
+
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
 
 def main():
-    if len(sys.argv) < 3:
-        print("Usage: python debug_layout.py <pdf_path> <page_number (1-based)>")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Debug layout analysis on a single PDF page."
+    )
+    parser.add_argument("pdf_path", help="Input PDF file")
+    parser.add_argument("page", type=int, help="Page number (1-based)")
+    parser.add_argument(
+        "--engine", choices=["paddlex", "surya"], default="paddlex",
+        help="Layout engine to use (default: paddlex)"
+    )
+    args = parser.parse_args()
 
-    pdf_path = sys.argv[1]
-    page_num = int(sys.argv[2]) - 1  # convert to 0-based
+    page_num = args.page - 1  # convert to 0-based
 
     # ------------------------------------------------------------------
     # [1] Render page
     # ------------------------------------------------------------------
-    print(f"[1] Rendering page {page_num + 1} of {pdf_path} ...")
+    print(f"[1] Rendering page {args.page} of {args.pdf_path} ...")
     import fitz
-    doc = fitz.open(pdf_path)
+    doc = fitz.open(args.pdf_path)
     page = doc[page_num]
-    mat = fitz.Matrix(300 / 72, 300 / 72)  # 300 dpi — same as production
+    mat = fitz.Matrix(300 / 72, 300 / 72)  # 300 dpi
     pix = page.get_pixmap(matrix=mat)
     from PIL import Image
     import numpy as np
@@ -82,132 +228,26 @@ def main():
     doc.close()
 
     # ------------------------------------------------------------------
-    # [2] Initialise pipeline (production logic)
+    # [2-3] Run engine
     # ------------------------------------------------------------------
-    print(f"\n[2] Initialising pipeline (production logic) ...")
-    pipeline, desc = _init_pipeline()
-    if pipeline is None:
-        print("Pipeline initialisation failed. Cannot continue.")
-        sys.exit(1)
-    print(f"    Pipeline ready: {desc}")
+    print(f"\n[2] Running {args.engine} layout analysis ...")
 
-    # ------------------------------------------------------------------
-    # [3] Run predict
-    # ------------------------------------------------------------------
-    print(f"\n[3] Running pipeline.predict() ...")
-    try:
-        result = pipeline.predict(img_array)
-        items = list(result)
-        print(f"    Got {len(items)} item(s)")
-    except Exception as e:
-        print(f"    predict() FAILED: {e}")
-        sys.exit(1)
+    if args.engine == "paddlex":
+        all_boxes = _run_paddlex(img, img_array, page_num)
+    else:
+        all_boxes = _run_surya(img, img_array, page_num)
+
+    print(f"    Detected {len(all_boxes)} region(s)")
 
     # ------------------------------------------------------------------
-    # [4] Dump raw structure
+    # [4] Print results
     # ------------------------------------------------------------------
-    print(f"\n[4] Raw result structure:")
-    all_boxes = []  # collect (label, score, coord) for summary
-
-    for i, item in enumerate(items):
-        print(f"\n  --- item[{i}] ---")
-        print(f"  type: {type(item)}")
-
-        def _get(obj, key, default=None):
-            if isinstance(obj, dict):
-                return obj.get(key, default)
-            return getattr(obj, key, default)
-
-        det_res = _get(item, "layout_det_res")
-        if det_res is not None:
-            boxes = _get(det_res, "boxes", [])
-            print(f"  layout_det_res -> boxes count: {len(boxes or [])}")
-            for j, box in enumerate(boxes or []):
-                label = box.get("label", "?") if isinstance(box, dict) else getattr(box, "label", "?")
-                score = box.get("score", 0)   if isinstance(box, dict) else getattr(box, "score", 0)
-                coord = box.get("coordinate", []) if isinstance(box, dict) else getattr(box, "coordinate", [])
-                print(f"    box[{j}]: label={label!r:25s} score={score:.3f}  coord={coord}")
-                all_boxes.append((str(label), float(score), coord))
-        else:
-            # Older flat format
-            boxes  = _get(item, "boxes",  [])
-            labels = _get(item, "labels", [])
-            scores = _get(item, "scores", [])
-            print(f"  (older format) boxes={len(boxes or [])}, labels={len(labels or [])}")
-            for j, (box, label) in enumerate(zip(boxes or [], labels or [])):
-                score = scores[j] if scores and j < len(scores) else 0
-                print(f"    box[{j}]: label={label!r:25s} score={score:.3f}  coord={box}")
-                all_boxes.append((str(label), float(score), box))
+    _print_results(all_boxes)
 
     # ------------------------------------------------------------------
-    # [5] filter_regions() simulation
+    # [5] Save debug image
     # ------------------------------------------------------------------
-    print(f"\n[5] filter_regions() classification (MIN_CONFIDENCE={MIN_CONFIDENCE}):")
-    text_count = figure_count = discard_count = skipped_count = 0
-    for label, score, coord in all_boxes:
-        label_lower = label.lower().strip()
-        if score < MIN_CONFIDENCE:
-            tag = "SKIP   "
-            skipped_count += 1
-        elif label_lower in DISCARD_TYPES:
-            tag = "DISCARD"
-            discard_count += 1
-        elif label_lower in FIGURE_TYPES:
-            tag = "FIGURE "
-            figure_count += 1
-        else:
-            tag = "TEXT   "
-            text_count += 1
-        print(f"    [{tag}]  {label!r:25s} score={score:.3f}")
-
-    print(f"\n    Summary: {text_count} text  |  {figure_count} figure  |  {discard_count} discard  |  {skipped_count} skipped")
-    if text_count + figure_count + discard_count == 0:
-        print("    WARNING: no boxes detected — production will use full-page fallback")
-
-    # ------------------------------------------------------------------
-    # [6] Save annotated debug image
-    # ------------------------------------------------------------------
-    print(f"\n[6] Saving annotated debug image ...")
-    from PIL import ImageDraw, ImageFont
-    debug_img = img.copy()
-    draw = ImageDraw.Draw(debug_img)
-
-    # Color per classification
-    COLORS = {
-        "FIGURE": (255, 0, 0),      # red
-        "TEXT": (0, 0, 255),         # blue
-        "DISCARD": (160, 160, 160),  # grey
-        "SKIP": (200, 200, 0),       # yellow
-    }
-
-    for label, score, coord in all_boxes:
-        label_lower = label.lower().strip()
-        if score < MIN_CONFIDENCE:
-            tag = "SKIP"
-        elif label_lower in DISCARD_TYPES:
-            tag = "DISCARD"
-        elif label_lower in FIGURE_TYPES:
-            tag = "FIGURE"
-        else:
-            tag = "TEXT"
-
-        color = COLORS[tag]
-        try:
-            x0, y0, x1, y1 = float(coord[0]), float(coord[1]), float(coord[2]), float(coord[3])
-        except (IndexError, TypeError, ValueError):
-            continue
-
-        # Draw bbox (3px thick)
-        for offset in range(3):
-            draw.rectangle([x0 - offset, y0 - offset, x1 + offset, y1 + offset], outline=color)
-
-        # Draw label text
-        caption = f"{label} ({score:.2f}) [{tag}]"
-        draw.text((x0 + 4, y0 + 4), caption, fill=color)
-
-    out_name = f"debug_page{page_num + 1}.png"
-    debug_img.save(out_name)
-    print(f"    Saved: {out_name}")
+    _save_debug_image(img, all_boxes, page_num, args.engine)
 
     print("\n[Done]")
 
