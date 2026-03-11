@@ -104,7 +104,10 @@ def convert(
 
         # ---- Stage 1: layout analysis ----
         regions = layout_analyzer.analyze_layout(rendered, page.page_number)
-        text_regions, figure_regions, discarded = layout_analyzer.filter_regions(regions)
+        page_h = rendered.height if rendered else 0
+        text_regions, figure_regions, discarded = layout_analyzer.filter_regions(
+            regions, page_height=page_h
+        )
 
         # ---- Extract figures ----
         if figure_regions:

@@ -1,7 +1,7 @@
 """
 layout_analyzer.py
 ------------------
-Page layout analysis using PaddleX PP-DocLayout-M (layout_parsing pipeline).
+Page layout analysis with Surya (primary) or PaddleX (fallback).
 
 Detects region types on each page:
   - header, footer, page_number  -> discarded (not included in EPUB)
@@ -39,16 +39,21 @@ class LayoutRegion:
     page_number: int = 0
 
 
-# Region type classification
-DISCARD_TYPES = frozenset({"header", "footer", "page_number", "number"})
-FIGURE_TYPES = frozenset({"figure", "table", "image"})
+# Region type classification (lowercase, covers both Surya and PaddleX labels)
+DISCARD_TYPES = frozenset({
+    "header", "footer", "page_number", "number",
+    "pageheader", "pagefooter",
+})
+FIGURE_TYPES = frozenset({"figure", "table", "image", "picture"})
 TEXT_TYPES = frozenset({
     "text", "title", "reference", "equation",
     "figure_caption", "table_caption",
+    "caption", "sectionheader", "listitem", "footnote",
+    "tableofcontents", "form", "code",
 })
 
 # Minimum confidence score to accept a detected region
-MIN_CONFIDENCE = 0.5
+MIN_CONFIDENCE = 0.3
 
 
 # ---------------------------------------------------------------------------
@@ -64,35 +69,45 @@ def _get_engine():
     Lazily initialise the layout analysis engine.
 
     Priority:
-    1. paddlex layout_parsing pipeline with PP-DocLayout-M  — PaddleOCR v3+
-    2. paddleocr.PPStructure                                — PaddleOCR v2 fallback
+    1. Surya LayoutPredictor              — most accurate
+    2. paddlex layout_parsing + PP-DocLayout-M  — PaddleOCR v3+
+    3. paddleocr.PPStructure              — PaddleOCR v2 fallback
     """
     global _engine, _engine_init_attempted
     if _engine_init_attempted:
         return _engine
     _engine_init_attempted = True
 
-    # --- Option 1: paddlex with PP-DocLayout-M (PaddleOCR v3 / paddlepaddle 3.x) ---
+    # --- Option 1: Surya ---
+    try:
+        from surya.layout import LayoutPredictor  # noqa: PLC0415
+        predictor = LayoutPredictor()
+        _engine = ("surya", predictor)
+        logger.info("Layout analysis: Surya LayoutPredictor ready")
+        return _engine
+    except Exception as exc:
+        logger.debug("Surya unavailable: %s", exc)
+
+    # --- Option 2: paddlex with PP-DocLayout-M ---
     try:
         from paddlex import create_pipeline  # noqa: PLC0415
 
-        # Try to configure PP-DocLayout-M via load_pipeline_config
         pipeline = None
         try:
-            from paddlex.inference.pipelines import load_pipeline_config  # noqa: PLC0415
+            from paddlex.inference.pipelines import load_pipeline_config
             config = load_pipeline_config("layout_parsing")
             try:
                 config["SubModules"]["LayoutDetection"]["model_name"] = "PP-DocLayout-M"
             except (KeyError, TypeError):
-                pass  # config structure may differ; proceed with default
+                pass
             pipeline = create_pipeline(config=config)
             logger.info("Layout analysis: paddlex layout_parsing + PP-DocLayout-M ready")
         except Exception as exc:
-            logger.debug("load_pipeline_config failed (%s); trying create_pipeline directly", exc)
+            logger.debug("load_pipeline_config failed (%s)", exc)
 
         if pipeline is None:
             pipeline = create_pipeline(pipeline="layout_parsing")
-            logger.info("Layout analysis: paddlex layout_parsing pipeline ready (default model)")
+            logger.info("Layout analysis: paddlex layout_parsing pipeline ready (default)")
 
         _engine = ("paddlex", pipeline)
         return _engine
@@ -100,13 +115,13 @@ def _get_engine():
     except Exception as exc:
         logger.debug("paddlex layout_parsing unavailable: %s", exc)
 
-    # --- Option 2: PPStructure (PaddleOCR v2) ---
+    # --- Option 3: PPStructure (PaddleOCR v2) ---
     try:
         from paddleocr import PPStructure  # noqa: PLC0415
     except ImportError:
         logger.warning(
-            "Layout analysis disabled: neither paddlex nor paddleocr.PPStructure "
-            "could be imported. Entire page treated as one text region."
+            "Layout analysis disabled: no engine available. "
+            "Entire page treated as one text region."
         )
         return None
 
@@ -132,6 +147,31 @@ def _get_engine():
 # ---------------------------------------------------------------------------
 # Result parsers
 # ---------------------------------------------------------------------------
+
+def _normalise_label(label: str) -> str:
+    """Normalise Surya PascalCase labels to lowercase for unified classification."""
+    return label.lower().replace("-", "").replace("_", "").strip()
+
+
+def _parse_surya_result(results, page_number: int) -> List[LayoutRegion]:
+    """Parse Surya LayoutPredictor output into LayoutRegion list."""
+    regions: List[LayoutRegion] = []
+    if not results:
+        return regions
+
+    for box in results[0].bboxes:
+        label = _normalise_label(box.label)
+        score = box.confidence if box.confidence is not None else 0.0
+        bbox = box.bbox  # [x_min, y_min, x_max, y_max]
+        regions.append(LayoutRegion(
+            region_type=label,
+            bbox=(float(bbox[0]), float(bbox[1]), float(bbox[2]), float(bbox[3])),
+            confidence=float(score),
+            page_number=page_number,
+        ))
+
+    return regions
+
 
 def _parse_paddlex_result(result, page_number: int) -> List[LayoutRegion]:
     """
@@ -275,7 +315,10 @@ def analyze_layout(
     img_array = np.array(image)
 
     try:
-        if engine_type == "paddlex":
+        if engine_type == "surya":
+            results = engine([image])
+            regions = _parse_surya_result(results, page_number)
+        elif engine_type == "paddlex":
             # predict() is a generator — pass img_array directly
             result = engine.predict(img_array)
             regions = _parse_paddlex_result(result, page_number)
@@ -301,11 +344,38 @@ def analyze_layout(
         return _full_page_fallback(image, page_number)
 
 
+def _is_positional_header_footer(
+    region: LayoutRegion,
+    page_height: float,
+) -> bool:
+    """
+    Detect likely header/footer by position heuristic.
+    A short region in the top 8% or bottom 10% of the page is likely
+    a running header/footer even if the model labels it as text.
+    """
+    if page_height <= 0:
+        return False
+    _, y0, _, y1 = region.bbox
+    region_height = y1 - y0
+    # Must be a short region (< 3% of page height)
+    if region_height > page_height * 0.03:
+        return False
+    # Top 8% or bottom 10%
+    if y0 < page_height * 0.08 or y1 > page_height * 0.90:
+        return True
+    return False
+
+
 def filter_regions(
     regions: List[LayoutRegion],
+    page_height: float = 0.0,
 ) -> Tuple[List[LayoutRegion], List[LayoutRegion], List[LayoutRegion]]:
     """
     Classify regions into three groups.
+
+    Args:
+        regions: Layout regions from analyze_layout().
+        page_height: Rendered page height in pixels (for positional filtering).
 
     Returns:
         (text_regions, figure_regions, discarded_regions)
@@ -316,6 +386,8 @@ def filter_regions(
 
     for r in regions:
         if r.region_type in DISCARD_TYPES:
+            discarded.append(r)
+        elif page_height > 0 and _is_positional_header_footer(r, page_height):
             discarded.append(r)
         elif r.region_type in FIGURE_TYPES:
             figure_regions.append(r)
