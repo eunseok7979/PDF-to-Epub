@@ -103,11 +103,16 @@ def _run_paddlex(img, img_array, page_num):
 
 def _run_surya(img, img_array, page_num):
     """Run Surya layout detection. Returns list of (label, score, [x0,y0,x1,y1])."""
-    from surya.foundation import FoundationPredictor
     from surya.layout import LayoutPredictor
 
     print("    Loading Surya layout model ...")
-    predictor = LayoutPredictor(FoundationPredictor())
+    try:
+        # Surya >= 0.17: requires FoundationPredictor
+        from surya.foundation import FoundationPredictor
+        predictor = LayoutPredictor(FoundationPredictor())
+    except (ImportError, TypeError):
+        # Surya 0.16.x: LayoutPredictor takes no args or checkpoint
+        predictor = LayoutPredictor()
     print("    Running layout detection ...")
     results = predictor([img])
 
