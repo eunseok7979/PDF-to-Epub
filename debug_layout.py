@@ -106,12 +106,14 @@ def _run_surya(img, img_array, page_num):
     from surya.layout import LayoutPredictor
 
     print("    Loading Surya layout model ...")
-    try:
-        # Surya >= 0.17: requires FoundationPredictor
+    import surya
+    version = getattr(surya, "__version__", "0.0.0")
+    major_minor = tuple(int(x) for x in version.split(".")[:2])
+
+    if major_minor >= (0, 17):
         from surya.foundation import FoundationPredictor
         predictor = LayoutPredictor(FoundationPredictor())
-    except (ImportError, TypeError):
-        # Surya 0.16.x: LayoutPredictor takes no args or checkpoint
+    else:
         predictor = LayoutPredictor()
     print("    Running layout detection ...")
     results = predictor([img])
