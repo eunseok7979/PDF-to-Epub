@@ -20,6 +20,9 @@ import dataclasses
 import re
 from typing import Dict, List, Optional, Tuple
 
+# Shared with layout_analyzer — any region type in this set is treated as image
+FIGURE_REGION_TYPES = frozenset({"figure", "table", "image", "picture"})
+
 
 # ---------------------------------------------------------------------------
 # Block model
@@ -162,11 +165,11 @@ def build_blocks(
 
     for rb in region_blocks:
         text = rb.text.strip()
-        if not text and rb.region_type not in ("figure", "table"):
+        if not text and rb.region_type not in FIGURE_REGION_TYPES:
             continue
 
         # --- Figure / table -> image placeholder ---
-        if rb.region_type in ("figure", "table", "image"):
+        if rb.region_type in FIGURE_REGION_TYPES:
             blocks.append(Block(
                 block_type="image",
                 text="",
