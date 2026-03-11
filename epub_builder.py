@@ -141,7 +141,7 @@ def _resolve_image_html(
     img = image_map.get(image_id)
     if img is None:
         return ""
-    src = f"../images/{img.image_id}.{img.ext}"
+    src = f"images/{img.image_id}.{img.ext}"
     return (
         f'<figure>\n'
         f'  <img src="{src}" alt="{img.image_id}" '
