@@ -166,7 +166,7 @@ def build_blocks(
             continue
 
         # --- Figure / table -> image placeholder ---
-        if rb.region_type in ("figure", "table"):
+        if rb.region_type in ("figure", "table", "image"):
             blocks.append(Block(
                 block_type="image",
                 text="",
